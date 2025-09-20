@@ -5,14 +5,47 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import os
+import json
+import hashlib
 from pathlib import Path
+from typing import Optional
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+
+# Security
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+active_tokens = set()
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> Optional[str]:
+    if token not in active_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    """Verify a password against a hash."""
+    return hashlib.sha256(password.encode()).hexdigest() == hashed_password
+
+def get_teacher(username: str):
+    """Get teacher from JSON file."""
+    try:
+        with open(os.path.join(current_dir, "teachers.json")) as f:
+            teachers = json.load(f)["teachers"]
+            for teacher in teachers:
+                if teacher["username"] == username:
+                    return teacher
+    except Exception as e:
+        print(f"Error reading teachers.json: {e}")
+    return None
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
@@ -88,8 +121,34 @@ def get_activities():
     return activities
 
 
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Authenticate teacher and create access token."""
+    teacher = get_teacher(form_data.username)
+    if not teacher or not verify_password(form_data.password, teacher["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create a simple token (in production, use proper JWT tokens)
+    token = f"{form_data.username}_token"
+    active_tokens.add(token)
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.post("/logout")
+async def logout(current_user: str = Depends(get_current_user)):
+    """Logout the current user by invalidating their token."""
+    active_tokens.remove(current_user)
+    return {"detail": "Successfully logged out"}
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(
+    activity_name: str,
+    email: str,
+    current_user: str = Depends(get_current_user)
+):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +170,11 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(
+    activity_name: str,
+    email: str,
+    current_user: str = Depends(get_current_user)
+):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
